@@ -109,7 +109,7 @@ func main() {
 	addParameter(flags, "port", "p", 8000, "HTTP port")
 	addParameter(flags, "validate-server", "", false, "Check hostname against configured servers")
 	addParameter(flags, "validate-request", "", false, "Check request data structure")
-
+	addParameter(flags, "enableCors", "c", false, "Enable CORS on all requests from all origins")
 	// Run the app!
 	root.Execute()
 }
@@ -148,8 +148,55 @@ func getTypedExample(mt *openapi3.MediaType) (interface{}, error) {
 		return mt.Examples[selected].Value.Value, nil
 	}
 
-	// TODO: generate data from JSON schema, if available?
+	if mt.Schema != nil {
+		return getTypedExampleFromSchema(mt.Schema.Value)
+	}
+	// TODO: generate data from JSON schema, if no examples available?
 
+	return nil, ErrNoExample
+}
+
+// getTypedExampleFromSchema will return an example from a given schema
+func getTypedExampleFromSchema(schema *openapi3.Schema) (interface{}, error) {
+	if schema.Example != nil {
+		return schema.Example, nil
+	}
+
+	if schema.Type == "number" {
+		return 0, nil
+	}
+	if schema.Type == "integer" {
+		return 0, nil
+	}
+	if schema.Type == "boolean" {
+		return true, nil
+	}
+	if schema.Type == "string" {
+		return "string", nil
+	}
+	if schema.Type == "array" {
+		example := []interface{}{}
+		if schema.Items != nil && schema.Items.Value != nil {
+			ex, err := getTypedExampleFromSchema(schema.Items.Value)
+			if err != nil {
+				return nil, fmt.Errorf("can't get example for array item")
+			}
+			example = append(example, ex)
+		}
+		return example, nil
+	}
+
+	if len(schema.Properties) > 0 {
+		example := map[string]interface{}{}
+		for k, v := range schema.Properties {
+			ex, err := getTypedExampleFromSchema(v.Value)
+			if err != nil {
+				return nil, fmt.Errorf("can't get example for '%s'", k)
+			}
+			example[k] = ex
+		}
+		return example, nil
+	}
 	return nil, ErrNoExample
 }
 
@@ -258,8 +305,20 @@ func server(cmd *cobra.Command, args []string) {
 	// Register our custom HTTP handler that will use the router to find
 	// the appropriate OpenAPI operation and try to return an example.
 	http.HandleFunc("/", func(w http.ResponseWriter, req *http.Request) {
+		//Enable CORS
+		if viper.GetBool("enableCors") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+
+			// Handle pre-flight OPTIONS request
+			if (*req).Method == "OPTIONS" {
+				return
+			}
+		}
+
 		info := fmt.Sprintf("%s %v", req.Method, req.URL)
-		route, _, err := router.FindRoute(req.Method, req.URL)
+		route, pathParams, err := router.FindRoute(req.Method, req.URL)
 		if err != nil {
 			log.Printf("ERROR: %s => %v", info, err)
 			w.WriteHeader(http.StatusNotFound)
@@ -270,6 +329,7 @@ func server(cmd *cobra.Command, args []string) {
 			err = openapi3filter.ValidateRequest(nil, &openapi3filter.RequestValidationInput{
 				Request: req,
 				Route:   route,
+				PathParams:  pathParams,
 				Options: &openapi3filter.Options{
 					AuthenticationFunc: func(c context.Context, input *openapi3filter.AuthenticationInput) error {
 						// TODO: support more schemes
@@ -348,5 +408,8 @@ func server(cmd *cobra.Command, args []string) {
 	})
 
 	fmt.Printf("🌱 Sprouting %s on port %d\n", swagger.Info.Title, viper.GetInt("port"))
+	if (viper.GetBool("enableCors")) {
+		fmt.Printf("🌱 - CORS enabled on all requests from all origins\n")
+	}
 	http.ListenAndServe(fmt.Sprintf(":%d", viper.GetInt("port")), nil)
 }
